@@ -7,6 +7,10 @@ The **Pit Row Controller** is a standalone engine management and dyno data acqui
 
 **Whether you are building a custom DIY brake dyno or retrofitting modern data acquisition onto an existing chassis, this controller handles the math so you can focus on the tuning.**
 
+![There is supposed to be a picture here](images/settingsScreen.jpg)
+
+![There is supposed to be a picture here](images/calibrationScreen.jpg)
+
 ![There is supposed to be a picture here](images/freestyleScreen.jpg)
 
 ![There is supposed to be a picture here](images/chartScreen.jpg)
