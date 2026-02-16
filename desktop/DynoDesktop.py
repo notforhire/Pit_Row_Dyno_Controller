@@ -185,18 +185,40 @@ class DynoApp:
             try:
                 data = {}
                 with open(f_path, 'r') as f:
-                    lines = f.readlines(); data_started = False
+                    lines = f.readlines()
+                    data_started = False
                     for line in lines:
-                        if line.startswith("RPM"): data_started = True; continue
-                        if not data_started or line.startswith("#"): continue
+                        # 1. Trigger the start when we see the main Header
+                        if line.startswith("RPM"): 
+                            data_started = True
+                            continue
+                        
+                        # 2. THE FIX: Ignore Comments (#), Metadata (COLS), or junk lines
+                        if not data_started or line.startswith("#") or line.startswith("COLS") or line.startswith("Metric"): 
+                            continue
+                        
                         row = line.strip().split(',')
+                        
+                        # 3. Safety Check: Must have 3 columns and be valid numbers
                         if len(row) >= 3:
-                            r, t, h = float(row[0]), float(row[1]), float(row[2])
-                            rnd_r = int(50 * round(r / 50)); data[rnd_r] = {'t': t, 'h': h}
-                self.comp_data = data; self.comp_name = os.path.basename(f_path)
+                            try:
+                                r = float(row[0])
+                                t = float(row[1])
+                                h = float(row[2])
+                                
+                                # Rounding logic (Keep this, it's good)
+                                rnd_r = int(50 * round(r / 50))
+                                data[rnd_r] = {'t': t, 'h': h}
+                            except ValueError:
+                                # If a line is garbage, just skip it. Don't crash.
+                                continue
+
+                self.comp_data = data
+                self.comp_name = os.path.basename(f_path)
                 messagebox.showinfo("Success", f"Loaded: {self.comp_name}")
                 self.generate_graph() 
-            except Exception as e: messagebox.showerror("Error", f"Load failed: {e}")
+            except Exception as e: 
+                messagebox.showerror("Error", f"Load failed: {e}")
 
     def get_correction_factor(self):
         try:

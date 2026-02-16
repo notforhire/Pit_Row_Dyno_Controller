@@ -6,11 +6,8 @@
 #include <Arduino_GFX_Library.h>
 #include "HX711.h"
 #include <Wire.h>
-#include "Adafruit_MCP9600.h"
 #include <Preferences.h> // Native ESP32 library for saving settings
 Preferences preferences; // Create the storage object
-
-Adafruit_MCP9600 mcp;
 
 Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
   GFX_NOT_DEFINED /* CS */, GFX_NOT_DEFINED /* SCK */, GFX_NOT_DEFINED /* SDA */,
@@ -282,6 +279,23 @@ void loadSavedSettings() {
   preferences.end();
 }
 
+// --- DYNO DAN'S RAW EGT DRIVER (10kHz Enforced) ---
+float readRawEGT() {
+    Wire.setClock(10000); // Force "Safe Mode" speed every time
+    Wire.beginTransmission(0x67);
+    Wire.write(0x00); // Pointer to Hot Junction Temp Register
+    Wire.endTransmission();
+    
+    if (Wire.requestFrom(0x67, 2) == 2) {
+        uint8_t upper = Wire.read();
+        uint8_t lower = Wire.read();
+        // Convert 2 bytes to temperature
+        int16_t val = (upper << 8) | lower; 
+        return val * 0.0625; // Scale factor for MCP9600
+    }
+    return 0.0; 
+}
+
 void setup() {
   dataMutex = xSemaphoreCreateMutex();
   pinMode(hallPin, INPUT_PULLDOWN); //Sets hall sensor as input
@@ -369,29 +383,30 @@ void setup() {
   engineToShaftRatio = primaryReduction * gearRatio * finalDriveRatio;
     
   // -------------------------------------------------------------------------
-  // --- FINAL EGT SENSOR SETUP (Moved here to be safe) ---
+  // --- FINAL EGT SENSOR SETUP (Raw Mode) ---
   // -------------------------------------------------------------------------
   
-  if (!mcp.begin(0x67)) { 
-    Serial.println("❌ MCP9600 NOT FOUND!");
-    egtFound = false;
-  } else {
-    Serial.println("✅ MCP9600 Found & Configured!");
-    
-    // 12-bit Resolution (Fastest: 2ms update rate)
-    mcp.setADCresolution(MCP9600_ADCRESOLUTION_14);
-    
-    // CHANGE 2: Turn off the hardware filter for instant reaction
-    // You can set this to 1 or 2 later if the numbers jump around too much
-    mcp.setFilterCoefficient(0); 
-    
-    mcp.setThermocoupleType(MCP9600_TYPE_K);
-    mcp.enable(true);
-    
+  // 1. Force Bus to correct pins and LOW SPEED
+  Wire.begin(19, 20); 
+  Wire.setClock(10000); 
+
+  // 2. Manual Handshake (Bypassing Library)
+  Wire.beginTransmission(0x67);
+  if (Wire.endTransmission() == 0) {
+    Serial.println("✅ MCP9600 Found (Raw Mode)!");
     egtFound = true;
     
-    // --- SHOW EGT LABEL IF SENSOR FOUND ---
+    // Optional: Write Configuration (Set to K-Type, Filter 0)
+    // Register 0x05 -> 0x00 (K-Type, No Filter)
+    Wire.beginTransmission(0x67);
+    Wire.write(0x05); 
+    Wire.write(0x00);
+    Wire.endTransmission();
+
     if(ui_LabelEGT) lv_obj_clear_flag(ui_LabelEGT, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    Serial.println("❌ MCP9600 NOT FOUND (Check Address/Wires)!");
+    egtFound = false;
   }
 
   // We check if the value is higher than a "Noise Floor" (approx 11.0 AFR)
@@ -1050,7 +1065,7 @@ void loop() {
   // Run this only every 20ms (50 times a second)
   if (millis() - lastEgtUpdate > 20) { 
     if (egtFound) {
-      float tempC = mcp.readThermocouple();
+      float tempC = readRawEGT();
       // Convert to F, but store as float for now
       snapEgt = (tempC * 1.8) + 32; 
     }
