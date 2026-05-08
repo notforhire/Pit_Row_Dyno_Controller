@@ -6,7 +6,54 @@
 #include <Arduino_GFX_Library.h>
 #include "HX711.h"
 #include <Wire.h>
+#include <WiFi.h>
 #include <Preferences.h> // Native ESP32 library for saving settings
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+
+#include "driver/twai.h"
+
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+// We keep this in PROGMEM so it lives in Flash, not your precious RAM
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html>
+<head>
+  <title>Pit Row Dyno</title>
+  <style>
+    body { background-color: #121212; color: #00FF00; font-family: monospace; text-align: center; margin-top: 50px; }
+    .gauge-container { display: flex; justify-content: space-around; }
+    .gauge { border: 2px solid #333; padding: 20px; width: 30%; }
+    .value { font-size: 80px; font-weight: bold; color: #fff; }
+    .label { font-size: 30px; color: #888; }
+  </style>
+</head>
+<body>
+  <h1>PIT ROW DYNO // LIVE</h1>
+  <div class="gauge-container">
+    <div class="gauge"><div class="label">RPM</div><div class="value" id="rpm">0</div></div>
+    <div class="gauge"><div class="label">HP</div><div class="value" id="hp">0.0</div></div>
+    <div class="gauge"><div class="label">TQ</div><div class="value" id="tq">0.0</div></div>
+  </div>
+  <script>
+    var gateway = `ws://${window.location.hostname}/ws`;
+    var websocket;
+    window.addEventListener('load', function() {
+      websocket = new WebSocket(gateway);
+      websocket.onmessage = function(event) {
+        var data = JSON.parse(event.data);
+        document.getElementById('rpm').innerHTML = data.rpm;
+        document.getElementById('hp').innerHTML = data.hp.toFixed(1);
+        document.getElementById('tq').innerHTML = data.tq.toFixed(1);
+      };
+    });
+  </script>
+</body>
+</html>
+)rawliteral";
+
 Preferences preferences; // Create the storage object
 
 Arduino_ESP32RGBPanel *bus = new Arduino_ESP32RGBPanel(
@@ -216,12 +263,12 @@ void IRAM_ATTR rpm_isr() {
 
     // We check if the new interval is drastically shorter (faster RPM) than the last one.
     if (prevInterval > 0) {
-        // Multiplier format: (Interval * Percentage) / 100
-        // 60 means the new interval must be at least 60% of the old one
-        // Lower number = Lets MORE signal through (Easier to accelerate)
-        // Higher number = MORE filtering (rejects noise better
-        unsigned long accelerationLimit = (prevInterval * 40) / 100; 
-        if (interval < accelerationLimit) return; // REJECT: Too fast, too soon.
+      // Multiplier format: (Interval * Percentage) / 100
+      // 60 means the new interval must be at least 60% of the old one
+      // Lower number = Lets MORE signal through (Easier to accelerate)
+      // Higher number = MORE filtering (rejects noise better
+      unsigned long accelerationLimit = (prevInterval * 40) / 100; 
+      if (interval < accelerationLimit) return; // REJECT: Too fast, too soon.
     }
 
   // If we pass the gauntlet, it's real data.
@@ -254,21 +301,21 @@ void loadSavedSettings() {
   // 3. AUTO-TARE (The Fix)
   // Check if scale is ready (give it 500ms)
   if (scale.wait_ready_timeout(500)) {
-      long currentReading = scale.read();
+    long currentReading = scale.read();
       
-      // Update the Global "Zero" to RIGHT NOW
-      noWeight = currentReading; 
+    // Update the Global "Zero" to RIGHT NOW
+    noWeight = currentReading; 
       
-      // Shift the "Calibration High Point" to match the new Zero
-      // (New Zero + Old Span = New High Point)
-      calibration = noWeight + calibrationSpan;
+    // Shift the "Calibration High Point" to match the new Zero
+    // (New Zero + Old Span = New High Point)
+    calibration = noWeight + calibrationSpan;
       
-      Serial.println("✅ Auto-Tare Complete. Calibration Span Preserved.");
+    Serial.println("✅ Auto-Tare Complete. Calibration Span Preserved.");
   } else {
-      Serial.println("⚠️ Scale Missing. Using Saved Values (May drift).");
-      // Fallback: Use the saved values directly if scale is unplugged
-      noWeight = savedNoWeight;
-      calibration = savedCalibration;
+    Serial.println("⚠️ Scale Missing. Using Saved Values (May drift).");
+    // Fallback: Use the saved values directly if scale is unplugged
+    noWeight = savedNoWeight;
+    calibration = savedCalibration;
   }
 
   // Apply the loaded math immediately
@@ -279,21 +326,21 @@ void loadSavedSettings() {
   preferences.end();
 }
 
-// --- DYNO DAN'S RAW EGT DRIVER (10kHz Enforced) ---
+// ---  RAW EGT DRIVER (10kHz Enforced) ---
 float readRawEGT() {
-    Wire.setClock(10000); // Force "Safe Mode" speed every time
-    Wire.beginTransmission(0x67);
-    Wire.write(0x00); // Pointer to Hot Junction Temp Register
-    Wire.endTransmission();
+  Wire.setClock(10000); // Force "Safe Mode" speed every time
+  Wire.beginTransmission(0x60);
+  Wire.write(0x00); // Pointer to Hot Junction Temp Register
+  Wire.endTransmission();
     
-    if (Wire.requestFrom(0x67, 2) == 2) {
-        uint8_t upper = Wire.read();
-        uint8_t lower = Wire.read();
-        // Convert 2 bytes to temperature
-        int16_t val = (upper << 8) | lower; 
-        return val * 0.0625; // Scale factor for MCP9600
-    }
-    return 0.0; 
+  if (Wire.requestFrom(0x60, 2) == 2) {
+    uint8_t upper = Wire.read();
+    uint8_t lower = Wire.read();
+    // Convert 2 bytes to temperature
+    int16_t val = (upper << 8) | lower; 
+    return val * 0.0625; // Scale factor for MCP9600
+  }
+  return 0.0; 
 }
 
 void setup() {
@@ -346,11 +393,11 @@ void setup() {
   // We wait max 500ms for the scale to be ready. 
   // If no sensors are attached, we skip this to prevent hanging the screen.
   if (scale.wait_ready_timeout(500)) {
-      noWeight = scale.read();
-      Serial.println("✅ Scale Found & Zeroed.");
+    noWeight = scale.read();
+    Serial.println("✅ Scale Found & Zeroed.");
   } else {
-      Serial.println("⚠️ Scale Missing - Skipping Boot Tare.");
-      // We don't change 'noWeight' here; we let loadSavedSettings() handle it next.
+    Serial.println("⚠️ Scale Missing - Skipping Boot Tare.");
+    // We don't change 'noWeight' here; we let loadSavedSettings() handle it next.
   } 
 
   //Code to execute LVGL code generated by the drawing tool
@@ -391,14 +438,14 @@ void setup() {
   Wire.setClock(10000); 
 
   // 2. Manual Handshake (Bypassing Library)
-  Wire.beginTransmission(0x67);
+  Wire.beginTransmission(0x60);
   if (Wire.endTransmission() == 0) {
     Serial.println("✅ MCP9600 Found (Raw Mode)!");
     egtFound = true;
     
     // Optional: Write Configuration (Set to K-Type, Filter 0)
     // Register 0x05 -> 0x00 (K-Type, No Filter)
-    Wire.beginTransmission(0x67);
+    Wire.beginTransmission(0x60);
     Wire.write(0x05); 
     Wire.write(0x00);
     Wire.endTransmission();
@@ -409,21 +456,22 @@ void setup() {
     egtFound = false;
   }
 
-  // We check if the value is higher than a "Noise Floor" (approx 11.0 AFR)
-  // If the sensor is connected and in free air (engine off), it will read High.
-  // If disconnected, the Pulldown resistor pulls it to 0.
-  delay(100); 
-  int detectionRead = analogReadMilliVolts(afrPin);
+  // -------------------------------------------------------------------------
+  // --- RAW ADS1115 WIDEBAND SETUP ---
+  // -------------------------------------------------------------------------
+  // Address 0x48 is the default for ADS1115 when the ADDR pin is tied to GND.
+  Wire.beginTransmission(0x48);
+  Wire.write(0x01); // Point to the Config Register
+  Wire.write(0x40); // MSB: MUX A0 to GND, +/- 6.144V Gain, Continuous Mode
+  Wire.write(0x83); // LSB: 128 Samples Per Second, Disable Comparator
   
-  if(detectionRead > 2400) {  // CHANGED FROM 300 TO 3000
+  if (Wire.endTransmission() == 0) {
+    Serial.println("✅ ADS1115 Found (Raw Mode)!");
     afrFound = true;
-    Serial.print("✅ Wideband Detected! Level: ");
-    Serial.println(detectionRead);
     if(ui_LabelAFR) lv_obj_clear_flag(ui_LabelAFR, LV_OBJ_FLAG_HIDDEN);
   } else {
+    Serial.println("❌ ADS1115 NOT FOUND (Check Address/Wires)!");
     afrFound = false;
-    Serial.print("❌ Wideband Missing (Ghost Signal Ignored). Level: ");
-    Serial.println(detectionRead);
     if(ui_LabelAFR) lv_obj_add_flag(ui_LabelAFR, LV_OBJ_FLAG_HIDDEN);
   }
 
@@ -495,6 +543,19 @@ void setup() {
     1,                /* Priority of the task */
     &SensorTask,      /* Task handle */
     0);               /* Core 0 */
+
+  // --- START TELEMETRY SERVER ---
+  WiFi.softAP("PitRowDyno", "dynopower"); 
+  Serial.print("✅ Hotspot Active! Connect to PitRowDyno. IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html);
+  });
+
+  server.addHandler(&ws);
+  server.begin();
+  // ------------------------------
 }
 
 //Function to zero out scale
@@ -623,18 +684,18 @@ void final_drive_update(lv_event_t * e) {
     lv_keyboard_set_textarea(ui_settingsKeyboard, ta);
   }
   else if(code == LV_EVENT_READY || code == LV_EVENT_DEFOCUSED) {
-        const char * txt = lv_textarea_get_text(ta);
-        float val = atof(txt);
-        if(val <= 0.0f) val = 1.0f;
-        finalDriveRatio = val;
-        engineToShaftRatio = primaryReduction * gearRatio * finalDriveRatio;
-        recalculateNoiseFilter(); 
-        // SAVE
-        preferences.begin("dyno", false);
-        preferences.putFloat("finalDrive", finalDriveRatio);
-        preferences.end();
-        lv_obj_add_flag(ui_settingsKeyboard, LV_OBJ_FLAG_HIDDEN);
-    }
+    const char * txt = lv_textarea_get_text(ta);
+    float val = atof(txt);
+    if(val <= 0.0f) val = 1.0f;
+    finalDriveRatio = val;
+    engineToShaftRatio = primaryReduction * gearRatio * finalDriveRatio;
+    recalculateNoiseFilter(); 
+    // SAVE
+    preferences.begin("dyno", false);
+    preferences.putFloat("finalDrive", finalDriveRatio);
+    preferences.end();
+    lv_obj_add_flag(ui_settingsKeyboard, LV_OBJ_FLAG_HIDDEN);
+  }
 }
 
 // --- CALLBACK: MAGNET COUNT TEXT AREA ---
@@ -643,8 +704,8 @@ void magnet_count_update(lv_event_t * e) {
   lv_obj_t * ta = lv_event_get_target(e);
 
   if(code == LV_EVENT_FOCUSED) {
-      lv_obj_clear_flag(ui_settingsKeyboard, LV_OBJ_FLAG_HIDDEN);
-      lv_keyboard_set_textarea(ui_settingsKeyboard, ta);
+    lv_obj_clear_flag(ui_settingsKeyboard, LV_OBJ_FLAG_HIDDEN);
+    lv_keyboard_set_textarea(ui_settingsKeyboard, ta);
   }
   else if(code == LV_EVENT_READY || code == LV_EVENT_DEFOCUSED) {
     const char * txt = lv_textarea_get_text(ta);
@@ -810,16 +871,16 @@ void drawChart(lv_event_t * e) {
 
   for(int i = 0; i < activeGraphBinCount; i++) {
     if(global_ser_afr) {
-        global_ser_afr->y_points[i] = a_bins[i];
-        if (a_bins[i] > maxAfrVal) { maxAfrVal = a_bins[i]; maxAfrIdx = i; }
+      global_ser_afr->y_points[i] = a_bins[i];
+      if (a_bins[i] > maxAfrVal) { maxAfrVal = a_bins[i]; maxAfrIdx = i; }
     }
     if(global_ser_torque) {
-        global_ser_torque->y_points[i] = t_bins[i];
-        if (t_bins[i] > maxTorqueValLocal) { maxTorqueValLocal = t_bins[i]; maxTorqueIdx = i; }
+      global_ser_torque->y_points[i] = t_bins[i];
+      if (t_bins[i] > maxTorqueValLocal) { maxTorqueValLocal = t_bins[i]; maxTorqueIdx = i; }
     }
     if(global_ser_hp) {
-        global_ser_hp->y_points[i] = h_bins[i];
-        if (h_bins[i] > maxHpValLocal) { maxHpValLocal = h_bins[i]; maxHpIdx = i; }
+      global_ser_hp->y_points[i] = h_bins[i];
+      if (h_bins[i] > maxHpValLocal) { maxHpValLocal = h_bins[i]; maxHpIdx = i; }
     }
     if(global_ser_egt) {
       global_ser_egt->y_points[i] = e_bins[i];
@@ -1062,32 +1123,56 @@ void loop() {
     maxHorsepowerRpm = snapRpm;
   }
 
-  // Run this only every 20ms (50 times a second)
+// Run this only every 20ms (50 times a second)
   if (millis() - lastEgtUpdate > 20) { 
     if (egtFound) {
       float tempC = readRawEGT();
       // Convert to F, but store as float for now
       snapEgt = (tempC * 1.8) + 32; 
     }
-    // ONLY READ IF FOUND
-    if (afrFound) {
-        // 1. Get the calibrated voltage directly in Millivolts (e.g., 1500 mV)
-        uint32_t pinMilliVolts = analogReadMilliVolts(afrPin);
+    
+// --- RAW ADS1115 WIDEBAND READ ---
+  if (afrFound) {
+    // Point to the Conversion Register
+    Wire.beginTransmission(0x48);
+    Wire.write(0x00); 
+    Wire.endTransmission();
         
-        // 2. Convert to Volts (1.5V)
-        float pinVoltage = pinMilliVolts / 1000.0;
-        
-        // 3. Undo the Voltage Divider (Same as before)
-        // (pinVoltage / 0.6 scales it back up to the real 0-5V sensor output)
-        float widebandVoltage = pinVoltage / 0.6; 
-        
-        // 4. Convert to AFR (Standard 10-20 scale)
-        snapAfr = (widebandVoltage * 2.0) + 10.0;
+    // Request the 2 bytes of voltage data
+    if (Wire.requestFrom(0x48, 2) == 2) {
+      uint8_t upper = Wire.read();
+      uint8_t lower = Wire.read();
+      int16_t rawADC = (upper << 8) | lower;
+            
+      // 1. Get the raw voltage sitting on the A0 pin (0 to ~3.4V)
+      float adcVoltage = (rawADC * 0.1875) / 1000.0; 
+            
+      // 2. Undo the hardware voltage divider 
+      // NOTE: This assumes your old 0.6 ratio. 
+      float realWidebandVoltage = adcVoltage / 0.505; 
+            
+      // 3. Convert the true 0-5V signal to 10-20 AFR
+      snapAfr = (realWidebandVoltage * 2.0) + 10.0;
     }
+  }
 
     lastEgtUpdate = millis();
   }
 
+  // --- LIVE TELEMETRY BROADCAST (10Hz) ---
+  static unsigned long lastBroadcast = 0;
+  if (millis() - lastBroadcast > 100) {
+    lastBroadcast = millis();
+    
+    ws.cleanupClients(); // PIO/C++ memory management
+    
+    char jsonString[64];
+    // Snprintf is safer in C++ to prevent buffer overflows
+    snprintf(jsonString, sizeof(jsonString), "{\"rpm\":%d, \"hp\":%.1f, \"tq\":%.1f}", rpm, snapHorsepower, snapTorque);
+    ws.textAll(jsonString); 
+  }
+  // ---------------------------------------
+  
   if (millis() - lastUIUpdate > 50) {
     updateDynoUI(); // Keep the loop clean
     if (ui_LabelEGT) {
@@ -1237,5 +1322,5 @@ void SensorTaskLoop(void * pvParameters) {
 }
 
 extern "C" long get_calibration_value() {
-    return calibration;
+  return calibration;
 }
